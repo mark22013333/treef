@@ -4,6 +4,8 @@
 MODE="fancy"
 SHOW_SIZE=false
 SHOW_GIT=false
+SHOW_MOD_TIME=false
+SHOW_CREATION_TIME=false
 MAX_DEPTH=99999
 file_count=0
 dir_count=0
@@ -29,13 +31,15 @@ cat << EOF
     -s              精簡模式 Simple mode (no emoji/color)
     -h              顯示檔案大小 Show file sizes
     -g              顯示 Git 狀態 Show Git file status
+    -t              顯示最後修改時間 Show last modification time
+    -ct             顯示建立時間 Show creation time
     -d <depth>      指定遞迴深度 Set recursion depth
     -?              顯示本說明 Show this help
 
 📌 範例:
-    treef -h
+    treef -h -t
     treef ~/projects -d 2 -g
-    treef /etc -s
+    treef /etc -s -ct
 
 EOF
 exit 0
@@ -47,8 +51,10 @@ human_size() {
         echo "${size}B"
     elif [ "$size" -lt 1048576 ]; then
         echo "$((size / 1024))KB"
-    else
+    elif [ "$size" -lt 1073741824 ]; then
         echo "$((size / 1048576))MB"
+    else
+        echo "$((size / 1073741824))GB"
     fi
 }
 
@@ -83,25 +89,60 @@ format_line() {
     local path="$4"
     local size_str=""
     local git_str=""
+    local time_str=""
 
+    # --- Robust Time Fetching Logic ---
+    if $SHOW_MOD_TIME; then
+        local mod_time
+        # Try macOS/BSD stat first, then fall back to GNU date for Linux
+        if ! mod_time=$(stat -f "%Sm" -t "%b %d %H:%M" "$path" 2>/dev/null); then
+            mod_time=$(date -r "$path" "+%b %d %H:%M" 2>/dev/null)
+        fi
+        time_str="[$mod_time]"
+    fi
+
+    if $SHOW_CREATION_TIME; then
+        local creation_time
+        # Try macOS/BSD stat for creation time first
+        if ! creation_time=$(stat -f "%SB" -t "%b %d %H:%M" "$path" 2>/dev/null); then
+            # Fall back to Linux stat for creation time
+            local creation_epoch
+            creation_epoch=$(stat -c %W "$path" 2>/dev/null)
+            if [ -n "$creation_epoch" ]; then
+                creation_time=$(date -d "@$creation_epoch" "+%b %d %H:%M" 2>/dev/null)
+            fi
+        fi
+        time_str="$time_str[$creation_time]"
+    fi
+
+    # --- Size and Git Status ---
     if $SHOW_SIZE && [ -f "$path" ]; then
         local size
         size=$(stat -c %s "$path" 2>/dev/null || stat -f %z "$path")
-        size_str="($(human_size "$size"))"
+        local human_readable_size
+        human_readable_size=$(human_size "$size")
+        size_str="($human_readable_size)"
+
+        if [[ "$human_readable_size" == *GB* && "$MODE" == "simple" ]]; then
+            size_str="(\033[0;31m${human_readable_size}\033[0m)"
+        fi
     fi
 
     if $SHOW_GIT; then
         git_str=$(get_git_status "$path")
     fi
 
+    # --- Final Output Formatting ---
+    local details="$time_str $size_str $git_str"
+
     if [ "$MODE" == "fancy" ]; then
         if [ -d "$path" ]; then
-            echo -e "${prefix}${connector} 📁 \033[1;34m$item\033[0m $git_str"
+            printf "%b\n" "${prefix}${connector} 📁 \033[1;34m$item\033[0m $git_str"
         else
-            echo -e "${prefix}${connector} 📄 $item $size_str $git_str"
+            printf "%b\n" "${prefix}${connector} 📄 $item $details"
         fi
     else
-        echo "${prefix}${connector} $item $size_str $git_str"
+        echo "${prefix}${connector} $item $details"
     fi
 }
 
@@ -112,7 +153,6 @@ print_tree() {
 
     if (( depth > MAX_DEPTH )); then return; fi
 
-    # Use a temporary file for maximum portability, avoiding subshell issues.
     find "$dir" -mindepth 1 -maxdepth 1 -print0 | LC_ALL=C sort -z > "$TMPFILE"
 
     local entries=()
@@ -154,8 +194,10 @@ while [[ $# -gt 0 ]]; do
         -s) MODE="simple"; shift ;;
         -h) SHOW_SIZE=true; shift ;;
         -g) SHOW_GIT=true; shift ;;
+        -t) SHOW_MOD_TIME=true; shift ;;
+        -ct) SHOW_CREATION_TIME=true; shift ;;
         -d) MAX_DEPTH="$2"; shift 2 ;;
-        "-?") print_help ;;
+        -\?) print_help ;;
         *) directory="${directory:-$1}"; shift ;;
     esac
 done
@@ -168,7 +210,7 @@ if [ ! -d "$directory" ]; then
 fi
 
 if [ "$MODE" == "fancy" ]; then
-    echo -e "📂 \033[1;36m$(basename "$directory")\033[0m/"
+    printf "%b\n" "📂 \033[1;36m$(basename "$directory")\033[0m/"
 else
     echo "$(basename "$directory")/"
 fi
@@ -177,7 +219,7 @@ print_tree "$directory" "" 1
 
 echo ""
 if [ "$MODE" == "fancy" ]; then
-    echo -e "📊 共計：📁 \033[1;34m$dir_count\033[0m 資料夾、📄 \033[0;33m$file_count\033[0m 檔案"
+    printf "%b\n" "📊 共計：📁 \033[1;34m$dir_count\033[0m 資料夾、📄 \033[0;33m$file_count\033[0m 檔案"
 else
     echo "共計：$dir_count 資料夾, $file_count 檔案"
 fi
