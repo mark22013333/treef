@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# bash 暫存
+*.swp
+*.bak
+*~
+
+# 壓縮檔
+*.tar.gz
+*.zip
+
+# 編譯暫存
+*.out
+*.o
+*.class
+
+/homebrew
+
+treef
