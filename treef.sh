@@ -34,7 +34,7 @@ cat << EOF
     -t              顯示最後修改時間 Show last modification time
     -ct             顯示建立時間 Show creation time
     -d <depth>      指定遞迴深度 Set recursion depth
-    -?              顯示本說明 Show this help
+    -help           顯示本說明 Show this help
 
 📌 範例:
     treef -h -t
@@ -197,7 +197,7 @@ while [[ $# -gt 0 ]]; do
         -t) SHOW_MOD_TIME=true; shift ;;
         -ct) SHOW_CREATION_TIME=true; shift ;;
         -d) MAX_DEPTH="$2"; shift 2 ;;
-        -\?) print_help ;;
+        -help) print_help ;;
         *) directory="${directory:-$1}"; shift ;;
     esac
 done
