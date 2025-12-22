@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# ==============================================================================
+# 📦 treef - 高顏值、高效能 CLI 目錄結構顯示工具 (Native Bash Version)
+# ==============================================================================
+
 # --- Configuration ---
 MODE="fancy"
 SHOW_SIZE=false
@@ -9,23 +13,26 @@ SHOW_CREATION_TIME=false
 MAX_DEPTH=99999
 file_count=0
 dir_count=0
+FILTER_INPUT=""
 
-# --- Cleanup Handler ---
-# Create a temporary file for directory listings.
-# Set up a trap to automatically delete the temp file when the script exits.
-TMPFILE=$(mktemp 2>/dev/null || mktemp -t 'treef')
-trap 'rm -f "$TMPFILE"' EXIT
+# --- System Settings ---
+# 開啟 glob 設定，讓 * 可以抓到隱藏檔，並不匹配空字串
+shopt -s dotglob nullglob
+# 設定語言環境以確保排序一致
+export LC_ALL=C
 
+# 偵測系統
+OS_TYPE=$(uname)
 
 # --- Functions ---
 
 print_help() {
 cat << EOF
 
-📦 treef - 高顏值 CLI 目錄結構顯示工具
+📦 treef - 高顏值 CLI 目錄結構顯示工具 (Native Fix)
 
 🌲 用法 / Usage:
-    treef [directory] [options...]
+    treef [directory] [pattern] [options...]
 
 🔧 可用參數 / Options:
     -s              精簡模式 Simple mode (no emoji/color)
@@ -36,10 +43,9 @@ cat << EOF
     -d <depth>      指定遞迴深度 Set recursion depth
     -help           顯示本說明 Show this help
 
-📌 範例:
-    treef -h -t
-    treef ~/projects -d 2 -g
-    treef /etc -s -ct
+🔍 過濾功能 / Filter:
+    支援萬用字元 (*) 以及使用 '@~' 分隔多個條件。
+    範例: treef . "cheng*"
 
 EOF
 exit 0
@@ -47,6 +53,10 @@ exit 0
 
 human_size() {
     local size=$1
+    if [ -z "$size" ] || [ "$size" -eq 0 ]; then
+        echo "0B"
+        return
+    fi
     if [ "$size" -lt 1024 ]; then
         echo "${size}B"
     elif [ "$size" -lt 1048576 ]; then
@@ -60,16 +70,11 @@ human_size() {
 
 get_git_status() {
     local path="$1"
-    if ! git rev-parse --is-inside-work-tree &>/dev/null; then
-        echo ""
-        return
-    fi
+    [ ! -e "$path" ] && return
 
-    local rel_path
-    rel_path=$(realpath --relative-to="$(git rev-parse --show-toplevel)" "$path" 2>/dev/null)
-    rel_path=${rel_path:-$path}
+    # 這裡的 git status 呼叫無法避免，但在大型專案若不需 git 建議不加 -g
     local status
-    status=$(git status --porcelain -- "$rel_path" 2>/dev/null)
+    status=$(git status --porcelain --ignore-submodules=dirty -- "$path" 2>/dev/null)
 
     if [[ -z "$status" ]]; then
         echo "✔️"
@@ -91,38 +96,45 @@ format_line() {
     local git_str=""
     local time_str=""
 
-    # --- Robust Time Fetching Logic ---
-    if $SHOW_MOD_TIME; then
+    local f_size=0
+    local f_mtime=0
+    local f_ctime=0
+
+    if $SHOW_SIZE || $SHOW_MOD_TIME || $SHOW_CREATION_TIME; then
+        if [ "$OS_TYPE" == "Darwin" ]; then
+            read -r f_size f_mtime f_ctime <<< $(stat -f "%z %m %B" "$path" 2>/dev/null)
+        else
+            read -r f_size f_mtime f_ctime <<< $(stat -c "%s %Y %W" "$path" 2>/dev/null)
+        fi
+        f_size=${f_size:-0}
+        f_mtime=${f_mtime:-0}
+        f_ctime=${f_ctime:-0}
+    fi
+
+    if $SHOW_MOD_TIME && [ "$f_mtime" -gt 0 ]; then
         local mod_time
-        # Try macOS/BSD stat first, then fall back to GNU date for Linux
-        if ! mod_time=$(stat -f "%Sm" -t "%b %d %H:%M" "$path" 2>/dev/null); then
-            mod_time=$(date -r "$path" "+%b %d %H:%M" 2>/dev/null)
+        if [ "$OS_TYPE" == "Darwin" ]; then
+             mod_time=$(date -r "$f_mtime" "+%b %d %H:%M")
+        else
+             mod_time=$(date -d "@$f_mtime" "+%b %d %H:%M")
         fi
         time_str="[$mod_time]"
     fi
 
-    if $SHOW_CREATION_TIME; then
+    if $SHOW_CREATION_TIME && [ "$f_ctime" -gt 0 ]; then
         local creation_time
-        # Try macOS/BSD stat for creation time first
-        if ! creation_time=$(stat -f "%SB" -t "%b %d %H:%M" "$path" 2>/dev/null); then
-            # Fall back to Linux stat for creation time
-            local creation_epoch
-            creation_epoch=$(stat -c %W "$path" 2>/dev/null)
-            if [ -n "$creation_epoch" ]; then
-                creation_time=$(date -d "@$creation_epoch" "+%b %d %H:%M" 2>/dev/null)
-            fi
+        if [ "$OS_TYPE" == "Darwin" ]; then
+             creation_time=$(date -r "$f_ctime" "+%b %d %H:%M")
+        else
+             creation_time=$(date -d "@$f_ctime" "+%b %d %H:%M")
         fi
         time_str="$time_str[$creation_time]"
     fi
 
-    # --- Size and Git Status ---
     if $SHOW_SIZE && [ -f "$path" ]; then
-        local size
-        size=$(stat -c %s "$path" 2>/dev/null || stat -f %z "$path")
         local human_readable_size
-        human_readable_size=$(human_size "$size")
+        human_readable_size=$(human_size "$f_size")
         size_str="($human_readable_size)"
-
         if [[ "$human_readable_size" == *GB* && "$MODE" == "simple" ]]; then
             size_str="(\033[0;31m${human_readable_size}\033[0m)"
         fi
@@ -132,7 +144,6 @@ format_line() {
         git_str=$(get_git_status "$path")
     fi
 
-    # --- Final Output Formatting ---
     local details="$time_str $size_str $git_str"
 
     if [ "$MODE" == "fancy" ]; then
@@ -153,20 +164,59 @@ print_tree() {
 
     if (( depth > MAX_DEPTH )); then return; fi
 
-    find "$dir" -mindepth 1 -maxdepth 1 -print0 | LC_ALL=C sort -z > "$TMPFILE"
+    # ---------------------------------------------------------
+    # 核心修復：使用原生 Bash Globbing 取代 find
+    # ---------------------------------------------------------
 
-    local entries=()
-    while IFS= read -r -d '' entry; do
-        entries+=("$entry")
-    done < "$TMPFILE"
+    # 讀取目錄下所有檔案到陣列 (已由 LC_ALL=C 自動排序)
+    # shopt -s dotglob 確保能抓到隱藏檔
+    local files=("$dir"/*)
 
-    local entry_count=${#entries[@]}
+    # 檢查是否為空目錄
+    if [ ${#files[@]} -eq 0 ]; then return; fi
+    # 有時 nullglob 沒生效，若陣列只有一個且不存在，則視為空
+    if [ ${#files[@]} -eq 1 ] && [ ! -e "${files[0]}" ] && [ ! -L "${files[0]}" ]; then return; fi
+
+    local entry_count=${#files[@]}
+
+    # 如果有過濾條件且在第一層，我们需要先計算真正符合條件的數量，以便繪製正確的樹狀線 (└──)
+    if (( depth == 1 )) && [ -n "$FILTER_INPUT" ]; then
+        local clean_filters="${FILTER_INPUT//@~/ }"
+        local filtered_files=()
+
+        for item_path in "${files[@]}"; do
+            local item_name="${item_path##*/}"
+            local matched=false
+
+            # 手動模擬 find 的 OR 邏輯
+            for pat in $clean_filters; do
+                # 使用 Bash [[ == ]] 進行 wildcard 比對
+                if [[ "$item_name" == $pat ]]; then
+                    matched=true
+                    break
+                fi
+            done
+
+            if $matched; then
+                filtered_files+=("$item_path")
+            fi
+        done
+
+        # 替換成過濾後的列表
+        files=("${filtered_files[@]}")
+        entry_count=${#files[@]}
+    fi
+
     local i=0
-
-    for item_path in "${entries[@]}"; do
+    for item_path in "${files[@]}"; do
         ((i++))
-        local item_name
-        item_name=$(basename "$item_path")
+        local item_name="${item_path##*/}"
+
+        # 排除 . 和 .. (雖然 glob 通常不會抓到，但保險起見)
+        if [[ "$item_name" == "." || "$item_name" == ".." ]]; then continue; fi
+
+        # 排除 .git 目錄，避免掃描過慢
+        if [[ "$item_name" == ".git" ]]; then continue; fi
 
         local connector="├──"
         local new_prefix="│   "
@@ -178,6 +228,7 @@ print_tree() {
         if [ -d "$item_path" ]; then
             ((dir_count++))
             format_line "$prefix" "$connector" "$item_name" "$item_path"
+            # 遞迴
             print_tree "$item_path" "$prefix$new_prefix" "$((depth + 1))"
         else
             ((file_count++))
@@ -198,7 +249,12 @@ while [[ $# -gt 0 ]]; do
         -ct) SHOW_CREATION_TIME=true; shift ;;
         -d) MAX_DEPTH="$2"; shift 2 ;;
         -help) print_help ;;
-        *) directory="${directory:-$1}"; shift ;;
+        *)
+            if [ -z "$directory" ]; then directory="$1"; else
+                [ -n "$FILTER_INPUT" ] && FILTER_INPUT="${FILTER_INPUT}@~${1}" || FILTER_INPUT="$1"
+            fi
+            shift
+            ;;
     esac
 done
 
@@ -214,6 +270,8 @@ if [ "$MODE" == "fancy" ]; then
 else
     echo "$(basename "$directory")/"
 fi
+
+[ -n "$FILTER_INPUT" ] && [ "$MODE" == "fancy" ] && echo -e "\033[0;90m(🔍 Filter: ${FILTER_INPUT//@~/, })\033[0m"
 
 print_tree "$directory" "" 1
 
